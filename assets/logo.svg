@@ -1,0 +1,63 @@
+<svg viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#38bdf8;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#0ea5e9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0284c7;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="innerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e293b;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- Shield outer -->
+  <path d="M60 5 L110 25 L110 75 Q110 120 60 135 Q10 120 10 75 L10 25 Z"
+        fill="url(#shieldGrad)" opacity="0.9"/>
+  <!-- Shield inner -->
+  <path d="M60 15 L100 32 L100 73 Q100 112 60 125 Q20 112 20 73 L20 32 Z"
+        fill="url(#innerGrad)"/>
+  <!-- Circuit traces -->
+  <g stroke="#38bdf8" stroke-width="1.5" fill="none" opacity="0.7" filter="url(#glow)">
+    <!-- Horizontal traces -->
+    <line x1="35" y1="50" x2="55" y2="50"/>
+    <line x1="65" y1="50" x2="85" y2="50"/>
+    <line x1="35" y1="70" x2="50" y2="70"/>
+    <line x1="70" y1="70" x2="85" y2="70"/>
+    <line x1="40" y1="90" x2="55" y2="90"/>
+    <line x1="65" y1="90" x2="80" y2="90"/>
+    <!-- Vertical traces -->
+    <line x1="60" y1="35" x2="60" y2="45"/>
+    <line x1="60" y1="55" x2="60" y2="65"/>
+    <line x1="60" y1="75" x2="60" y2="85"/>
+    <line x1="60" y1="95" x2="60" y2="105"/>
+    <!-- Diagonal traces -->
+    <line x1="45" y1="55" x2="40" y2="65"/>
+    <line x1="75" y1="55" x2="80" y2="65"/>
+    <line x1="50" y1="75" x2="45" y2="85"/>
+    <line x1="70" y1="75" x2="75" y2="85"/>
+  </g>
+  <!-- Circuit nodes -->
+  <g fill="#38bdf8" filter="url(#glow)">
+    <circle cx="35" cy="50" r="2.5"/>
+    <circle cx="85" cy="50" r="2.5"/>
+    <circle cx="35" cy="70" r="2.5"/>
+    <circle cx="85" cy="70" r="2.5"/>
+    <circle cx="40" cy="90" r="2.5"/>
+    <circle cx="80" cy="90" r="2.5"/>
+    <circle cx="60" cy="35" r="2.5"/>
+    <circle cx="60" cy="105" r="2.5"/>
+  </g>
+  <!-- Central eye / scan element -->
+  <ellipse cx="60" cy="62" rx="14" ry="9" stroke="#38bdf8" stroke-width="2" fill="none" filter="url(#glow)"/>
+  <circle cx="60" cy="62" r="4" fill="#38bdf8" filter="url(#glow)"/>
+  <!-- AI text -->
+  <text x="60" y="118" text-anchor="middle" fill="#38bdf8" font-family="monospace"
+        font-size="11" font-weight="bold" letter-spacing="3" filter="url(#glow)">AI</text>
+</svg>
