@@ -31,7 +31,6 @@ from utils.sanitizer import sanitize_html
 # ─────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    <meta name="google-site-verification" content="9XHKJpMNMnOIOfTdva87Yq47PEvvhEzslzQ8IWF_4GY" />
     page_title="AegisTrace AI — SIEM Investigation",
     page_icon="🛡️",
     layout="wide",
