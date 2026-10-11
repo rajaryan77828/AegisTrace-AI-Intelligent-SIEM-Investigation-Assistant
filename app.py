@@ -118,7 +118,6 @@ with st.sidebar:
         else:
             st.warning("⚠️ No backend API key configured. API keys must be set on the server via `.env` or Streamlit Secrets (`AEGIS_API_KEY`). Frontend key inputs are disabled.")
         st.caption("SIEM text is isolated as untrusted data. AI narrative remains advisory only.")
-                   "data and the reply is advisory only.")
 
     st.markdown('<div class="side-h">About</div>', unsafe_allow_html=True)
     st.caption("AegisTrace AI is a defensive triage tool. It never executes commands, blocks IPs, or "
