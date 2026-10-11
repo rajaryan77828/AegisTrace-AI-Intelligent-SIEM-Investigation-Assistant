@@ -1,723 +1,476 @@
 """
-AegisTrace AI — Intelligent SIEM Investigation Assistant
-Professional cybersecurity dashboard with glassmorphism UI,
-animated timeline, MITRE ATT&CK mapping, and risk scoring.
+AegisTrace AI — Intelligent SIEM Investigation Assistant (v2.1)
 
-Version 2.0.0
+Run:  streamlit run app.py
 """
+from __future__ import annotations
+
+import hashlib
+import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from analyzer import analyze_events, build_report
+from analyzer import VERSION, analyze_events, build_report
 from components.styles import (
-    get_all_styles,
-    render_checklist_item,
-    render_injection_warning,
-    render_metric_card,
-    render_pattern_card,
-    render_risk_gauge,
-    render_timeline_event,
+    get_all_styles, render_art_side, render_checklist_item, render_empty, render_footer, render_hero,
+    render_injection_warning, render_ioc_card, render_metric_card, render_pattern_card, render_risk_gauge,
+    render_section, render_sidebar_brand, render_timeline_event,
+    render_subscription_card, render_company_showcase, render_plan_card,
 )
-from llm_summary import generate_llm_summary, llm_available
-from utils.sanitizer import sanitize_html
-
-# ─────────────────────────────────────────────────────────────
-# Page Config
-# ─────────────────────────────────────────────────────────────
-
-st.set_page_config(
-    page_title="AegisTrace AI — SIEM Investigation",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from llm_providers import (
+    PROTOCOL_LABELS, PROVIDERS, LLMConfig, LLMError, config_from_env, test_connection,
 )
+from llm_summary import generate_llm_summary
+from utils.compat import STRETCH
+from utils.sanitizer import csv_safe, sanitize_html, sanitize_llm_output
 
-# Inject all styles
+BASE = Path(__file__).resolve().parent
+MAX_UPLOAD_MB = 20
+
+st.set_page_config(page_title="AegisTrace AI — SIEM Investigation", page_icon="🛡️",
+                   layout="wide", initial_sidebar_state="expanded")
 st.markdown(get_all_styles(), unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# Hero Banner
+# LLM provider state (front-end configurable)
 # ─────────────────────────────────────────────────────────────
 
-st.markdown("""
-<div class="hero-banner">
-    <div class="hero-title">
-        🛡️ <span class="accent">AegisTrace</span> AI
-    </div>
-    <div class="hero-subtitle">
-        Intelligent SIEM Investigation Assistant — Detect · Correlate · Investigate · Defend
-    </div>
-    <div class="hero-status">
-        <div class="pulse-dot"></div>
-        System Active — Defensive Analysis Mode
-    </div>
-</div>
-""", unsafe_allow_html=True)
+_ENV_CFG: LLMConfig = config_from_env()
+
+
+def _init_llm_state() -> None:
+    if st.session_state.get("llm_init"):
+        return
+    st.session_state.update(
+        llm_provider=_ENV_CFG.provider, llm_protocol=_ENV_CFG.protocol, llm_base_url=_ENV_CFG.base_url,
+        llm_model=_ENV_CFG.model, llm_api_key="",  # never pre-fill a server-side key into the browser
+        llm_temperature=0.1, llm_max_tokens=1800, llm_timeout=60, llm_auth_header="", llm_auth_prefix="",
+        llm_enabled=False, llm_test=None, advisory=None, llm_init=True,
+    )
+
+
+def _on_provider_change() -> None:
+    p = PROVIDERS[st.session_state.llm_provider]
+    st.session_state.llm_base_url = p["base_url"]
+    st.session_state.llm_model = p["default_model"]
+    st.session_state.llm_protocol = p["protocol"]
+    st.session_state.llm_test = None
+
+
+def current_config() -> LLMConfig:
+    s = st.session_state
+    key = (s.llm_api_key or "").strip()
+    # A server-side key is only ever used with the server's own endpoint, so a visitor
+    # cannot redirect it to an attacker-controlled URL.
+    if not key and (s.llm_provider == _ENV_CFG.provider and s.llm_protocol == _ENV_CFG.protocol
+                    and s.llm_base_url.rstrip("/") == _ENV_CFG.base_url.rstrip("/")):
+        key = _ENV_CFG.api_key
+    return LLMConfig(
+        provider=s.llm_provider, protocol=s.llm_protocol, base_url=s.llm_base_url.strip(),
+        model=s.llm_model.strip(), api_key=key, temperature=float(s.llm_temperature),
+        max_tokens=int(s.llm_max_tokens), timeout=int(s.llm_timeout),
+        auth_header=s.llm_auth_header.strip(), auth_prefix=s.llm_auth_prefix,
+    )
+
+
+_init_llm_state()
 
 # ─────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("""
-    <div class="sidebar-brand">
-        <h3>🛡️ AegisTrace AI</h3>
-        <p>SOC Triage Platform v2.0</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(render_sidebar_brand(), unsafe_allow_html=True)
 
-    st.markdown('<div class="sidebar-section"><h4>📁 Data Input</h4>', unsafe_allow_html=True)
-    uploaded = st.file_uploader(
-        "Upload SIEM alerts",
-        type=["json", "csv"],
-        help="Accepts JSON arrays or CSV files with standard SIEM fields",
-    )
-    paste = st.text_area(
-        "Or paste JSON",
-        height=160,
-        placeholder='[{"timestamp":"2026-10-06T10:00:00Z","source_ip":"10.0.0.5",'
-                    '"event_type":"login_failed","user":"admin"}]',
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-h">Data input</div>', unsafe_allow_html=True)
+    uploaded = st.file_uploader("Upload SIEM alerts", type=["json", "csv"],
+                                help=f"JSON array / wrapper object or CSV. Max {MAX_UPLOAD_MB} MB.")
+    paste = st.text_area("Or paste JSON / CSV", height=130,
+                         placeholder='[{"timestamp":"2026-10-06T10:00:00Z","source_ip":"10.0.0.5",'
+                                     '"event_type":"login_failed","user":"admin"}]')
+    demo = st.radio("Demo dataset", ["JSON — multi-stage intrusion", "CSV — brute force"],
+                    horizontal=False, help="Used when nothing is uploaded or pasted.")
 
-    st.markdown('<div class="sidebar-section"><h4>🤖 AI Configuration</h4>',
-                unsafe_allow_html=True)
-    use_llm = st.toggle("Enable LLM Advisory Narrative", value=False)
-    st.caption(
-        "⚠️ LLM output is advisory only. Alert content is treated as "
-        "untrusted evidence and is never executed."
-    )
-    if use_llm and not llm_available():
-        st.warning("LLM not configured. Add OPENAI_API_KEY in Streamlit Secrets.")
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-h">AI provider</div>', unsafe_allow_html=True)
+    st.toggle("Enable AI advisory narrative", key="llm_enabled",
+              help="Off by default. Nothing is sent to any provider unless you click Generate.")
+    if st.session_state.llm_enabled:
+        st.selectbox("Provider", list(PROVIDERS), key="llm_provider", on_change=_on_provider_change,
+                     format_func=lambda k: PROVIDERS[k]["label"])
+        preset = PROVIDERS[st.session_state.llm_provider]
+        st.text_input("Base URL", key="llm_base_url", placeholder="https://api.example.com/v1")
+        st.text_input("Model", key="llm_model",
+                      help="Any model id your provider supports." + (
+                          f" Suggestions: {', '.join(preset['models'][:4])}" if preset["models"] else ""))
+        st.text_input("API key", key="llm_api_key", type="password",
+                      placeholder="Leave empty for local models" if not preset["key_required"] else "sk-…",
+                      help="Kept in this browser session's memory only. Never saved or exported.")
+        with st.expander("Advanced"):
+            st.selectbox("Protocol", list(PROTOCOL_LABELS), key="llm_protocol",
+                         format_func=PROTOCOL_LABELS.get,
+                         help="Pick the request format your endpoint speaks.")
+            st.slider("Temperature", 0.0, 1.0, key="llm_temperature", step=0.05)
+            st.number_input("Max output tokens", 200, 8000, key="llm_max_tokens", step=100)
+            st.number_input("Timeout (s)", 10, 300, key="llm_timeout", step=10)
+            st.text_input("Custom auth header", key="llm_auth_header", placeholder="e.g. X-API-Key",
+                          help="Leave empty to use the protocol default.")
+            st.text_input("Auth value prefix", key="llm_auth_prefix", placeholder="e.g. Bearer ")
+        c1, c2 = st.columns(2)
+        if c1.button("Test connection", **STRETCH):
+            with st.spinner("Testing…"):
+                st.session_state.llm_test = test_connection(current_config())
+        if c2.button("Clear key", **STRETCH):
+            st.session_state.llm_api_key = ""
+            st.session_state.llm_test = None
+            st.rerun()
+        test = st.session_state.llm_test
+        if test:
+            (st.success if test[0] else st.error)(sanitize_llm_output(test[1]))
+        st.caption("Alert content is sent to the provider you choose. SIEM text is wrapped as untrusted "
+                   "data and the reply is advisory only.")
 
-    st.markdown('<div class="sidebar-section"><h4>ℹ️ About</h4>', unsafe_allow_html=True)
-    st.caption(
-        "AegisTrace AI is a defensive SOC triage tool. It does NOT execute "
-        "commands, access endpoints, block IPs, or perform automated containment. "
-        "All response actions require analyst review and approval."
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="side-h">About</div>', unsafe_allow_html=True)
+    st.caption("AegisTrace AI is a defensive triage tool. It never executes commands, blocks IPs, or "
+               "touches endpoints. Every response action needs analyst approval.")
 
 # ─────────────────────────────────────────────────────────────
-# Data Loading
+# Data loading (cached)
 # ─────────────────────────────────────────────────────────────
 
-def load_input():
-    """Load SIEM events from upload, paste, or built-in sample."""
+
+def _decode(raw: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-16", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+@st.cache_data(show_spinner="Analyzing events…", max_entries=8)
+def run_analysis(raw: bytes, hint: str) -> dict:
+    text = _decode(raw).strip()
+    if hint == "csv" or (hint == "auto" and text[:1] not in "[{"):
+        rows = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False).to_dict("records")
+        return analyze_events(rows)
+    return analyze_events(json.loads(text))
+
+
+def pick_input() -> tuple[bytes, str, str]:
+    """Return (bytes, format hint, human label)."""
     if uploaded is not None:
-        raw = uploaded.getvalue()
-        if uploaded.name.lower().endswith(".csv"):
-            return pd.read_csv(pd.io.common.BytesIO(raw)).to_dict(orient="records")
-        return json.loads(raw.decode("utf-8"))
-
+        if uploaded.size > MAX_UPLOAD_MB * 1024 * 1024:
+            raise ValueError(f"File is larger than {MAX_UPLOAD_MB} MB.")
+        return uploaded.getvalue(), "csv" if uploaded.name.lower().endswith(".csv") else "json", uploaded.name
     if paste.strip():
-        return json.loads(paste)
-
-    # Built-in demo data — a realistic multi-stage attack scenario
-    with open("sample_alerts.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+        return paste.encode("utf-8"), "auto", "pasted data"
+    name = "sample_alerts.csv" if demo.startswith("CSV") else "sample_alerts.json"
+    return (BASE / name).read_bytes(), "csv" if name.endswith(".csv") else "json", f"demo: {name}"
 
 
 try:
-    raw_events = load_input()
-    result = analyze_events(raw_events)
-except Exception as exc:
-    st.error(f"⚠️ Could not parse the supplied SIEM data: {exc}")
+    raw_bytes, fmt_hint, source_label = pick_input()
+    result = run_analysis(raw_bytes, fmt_hint)
+except Exception as exc:  # noqa: BLE001 - surface any parse problem to the analyst
+    st.markdown(render_hero("Waiting for valid input", warn=True), unsafe_allow_html=True)
+    st.error(f"Could not parse the supplied SIEM data: {sanitize_llm_output(str(exc)[:300])}")
     st.stop()
 
-events = result["events"]
-summary = result["summary"]
-timeline = result["timeline"]
-patterns = result["patterns"]
-injection_flags = result["prompt_injection_flags"]
-iocs = result.get("iocs", [])
-checklist = result["checklist"]
-risk_score = summary.get("risk_score", 0)
+data_sig = hashlib.sha256(raw_bytes).hexdigest()[:16]
+events, summary, timeline = result["events"], result["summary"], result["timeline"]
+patterns, injection_flags = result["patterns"], result["prompt_injection_flags"]
+iocs, checklist, risk_score = result["iocs"], result["checklist"], summary["risk_score"]
+is_demo = uploaded is None and not paste.strip()
+
+st.markdown(render_hero(f"Analyzing {source_label}"), unsafe_allow_html=True)
+if is_demo:
+    st.info("Showing built-in demo data. Upload a file or paste alerts in the sidebar to analyze your own.")
+if summary["unparsed_timestamps"]:
+    st.warning(f"{summary['unparsed_timestamps']} event(s) have unreadable timestamps and are placed last "
+               "in the timeline.")
 
 # ─────────────────────────────────────────────────────────────
-# Metric Cards Row
+# Metrics
 # ─────────────────────────────────────────────────────────────
 
 cols = st.columns(6)
+cards = [
+    render_metric_card("📊", summary["total_events"], "Total events", "blue"),
+    render_metric_card("🔴", summary["high_critical"], "High / critical",
+                       "red" if summary["high_critical"] else "green", critical=summary["high_critical"] > 2),
+    render_metric_card("🌐", summary["unique_source_ips"], "Source IPs", "cyan"),
+    render_metric_card("🖥️", summary["unique_hosts"], "Hosts", "purple"),
+    render_metric_card("🛡️", len(injection_flags), "Injection flags",
+                       "red" if injection_flags else "green", critical=bool(injection_flags)),
+    render_risk_gauge(risk_score),
+]
+for col, card in zip(cols, cards):
+    col.markdown(card, unsafe_allow_html=True)
+st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
 
-with cols[0]:
-    st.markdown(
-        render_metric_card("📊", summary["total_events"], "Total Events", "blue"),
-        unsafe_allow_html=True,
-    )
 
-with cols[1]:
-    crit_class = "red" if summary["high_critical"] > 0 else "green"
-    is_crit = summary["high_critical"] > 2
-    st.markdown(
-        render_metric_card("🔴", summary["high_critical"], "High / Critical",
-                           crit_class, critical=is_crit),
-        unsafe_allow_html=True,
-    )
+def style_fig(fig: go.Figure, height: int = 300) -> go.Figure:
+    fig.update_layout(
+        template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="IBM Plex Sans, system-ui, sans-serif", color="#8aa0b2"),
+        margin=dict(l=10, r=10, t=10, b=30), height=height, showlegend=False)
+    fig.update_xaxes(gridcolor="rgba(138,160,178,.12)")
+    fig.update_yaxes(gridcolor="rgba(138,160,178,.12)")
+    return fig
 
-with cols[2]:
-    st.markdown(
-        render_metric_card("🌐", summary["unique_source_ips"], "Source IPs", "cyan"),
-        unsafe_allow_html=True,
-    )
 
-with cols[3]:
-    st.markdown(
-        render_metric_card("🖥️", summary["unique_hosts"], "Hosts", "purple"),
-        unsafe_allow_html=True,
-    )
+def chart(fig: go.Figure) -> None:
+    st.plotly_chart(fig, config={"displayModeBar": False}, **STRETCH)
 
-with cols[4]:
-    inj_color = "red" if injection_flags else "green"
-    st.markdown(
-        render_metric_card("🛡️", len(injection_flags), "Injection Flags",
-                           inj_color, critical=bool(injection_flags)),
-        unsafe_allow_html=True,
-    )
 
-with cols[5]:
-    st.markdown(render_risk_gauge(risk_score), unsafe_allow_html=True)
+def event_frame(evs: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(evs)
+    return df.drop(columns=[c for c in ("raw_text", "mitre") if c in df.columns])
 
-st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+tabs = st.tabs(["📌 Overview", "🕒 Timeline", "🔎 Patterns & MITRE", "🎯 IOCs", "🧪 Alert data",
+                "✅ Checklist", "🤖 AI advisory", "💎 Enterprise Tiers", "📄 Report & export"])
 
-# ─────────────────────────────────────────────────────────────
-# Main Tabs
-# ─────────────────────────────────────────────────────────────
-
-tabs = st.tabs([
-    "📌 Incident Overview",
-    "🕒 Timeline",
-    "🔎 Patterns & MITRE",
-    "🎯 IOC Extraction",
-    "🧪 Alert Data",
-    "✅ Investigation Checklist",
-    "📄 Report & Export",
-])
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 0: Incident Overview
-# ═══════════════════════════════════════════════════════════════
-
+# ── Overview ───────────────────────────────────────────────
 with tabs[0]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">📌</span>
-        <h2>Incident Overview</h2>
-        <span class="section-badge badge-blue">AUTOMATED ANALYSIS</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(
-        f'<div class="metric-glass blue fade-in" style="margin-bottom:1.5rem;">'
-        f'<div style="color:#94a3b8;font-size:0.78rem;text-transform:uppercase;'
-        f'letter-spacing:1.5px;margin-bottom:0.5rem;">Narrative Summary</div>'
-        f'<div style="color:#cbd5e1;line-height:1.8;font-size:0.95rem;">'
-        f'{sanitize_html(summary["narrative"])}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    # Injection warning
+    st.markdown(render_section("📌", "Incident overview", "AUTOMATED ANALYSIS"), unsafe_allow_html=True)
+    st.markdown(f'<div class="panel blue"><div class="cap">Narrative summary</div>'
+                f'{sanitize_html(summary["narrative"])}</div>', unsafe_allow_html=True)
     if injection_flags:
-        st.markdown(render_injection_warning(len(injection_flags)),
+        st.markdown(render_injection_warning(len(injection_flags)), unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(injection_flags), hide_index=True, **STRETCH)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(render_section("📊", "Severity distribution"), unsafe_allow_html=True)
+        sev_df = pd.DataFrame([{"severity": s, "count": summary["severity_counts"].get(s, 0)}
+                               for s in ("low", "medium", "high", "critical")
+                               if summary["severity_counts"].get(s, 0)])
+        fig = px.bar(sev_df, x="severity", y="count", color="severity",
+                     color_discrete_map={"low": "#4ade80", "medium": "#fbbf24", "high": "#ff9f43", "critical": "#ff5d5d"})
+        chart(style_fig(fig))
+    with c2:
+        st.markdown(render_section("🗂️", "Event categories"), unsafe_allow_html=True)
+        cat_df = pd.DataFrame([{"category": k.replace("_", " ").title(), "count": v}
+                               for k, v in summary["category_counts"].items()]).sort_values("count")
+        fig = px.bar(cat_df, x="count", y="category", orientation="h", color_discrete_sequence=["#2dd4bf"])
+        chart(style_fig(fig))
+
+    if summary["mitre_techniques"]:
+        st.markdown(render_section("🎯", "MITRE ATT&CK techniques observed"), unsafe_allow_html=True)
+        st.markdown("".join(f'<span class="mitre" style="margin:0 .4rem .4rem 0;display:inline-block">'
+                            f'{sanitize_html(t)}</span>' for t in summary["mitre_techniques"]),
                     unsafe_allow_html=True)
-        st.dataframe(
-            pd.DataFrame(injection_flags),
-            use_container_width=True,
-            hide_index=True,
-        )
 
-    # Charts row
-    chart_col1, chart_col2 = st.columns(2)
-
-    with chart_col1:
-        st.markdown("""
-        <div class="section-header">
-            <span class="section-icon">📊</span>
-            <h2>Severity Distribution</h2>
-        </div>
-        """, unsafe_allow_html=True)
-
-        sev_data = summary["severity_counts"]
-        sev_order = ["low", "medium", "high", "critical"]
-        sev_colors = {"low": "#22c55e", "medium": "#eab308",
-                      "high": "#f97316", "critical": "#ef4444"}
-
-        sev_df = pd.DataFrame([
-            {"severity": s, "count": sev_data.get(s, 0)}
-            for s in sev_order if sev_data.get(s, 0) > 0
-        ])
-
-        if not sev_df.empty:
-            fig_sev = px.bar(
-                sev_df, x="severity", y="count",
-                color="severity",
-                color_discrete_map=sev_colors,
-                template="plotly_dark",
-            )
-            fig_sev.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Inter", color="#94a3b8"),
-                showlegend=False,
-                margin=dict(l=20, r=20, t=20, b=40),
-                xaxis=dict(gridcolor="rgba(56,189,248,0.05)"),
-                yaxis=dict(gridcolor="rgba(56,189,248,0.05)"),
-                height=300,
-            )
-            st.plotly_chart(fig_sev, use_container_width=True)
-
-    with chart_col2:
-        st.markdown("""
-        <div class="section-header">
-            <span class="section-icon">🗂️</span>
-            <h2>Event Categories</h2>
-        </div>
-        """, unsafe_allow_html=True)
-
-        cat_data = summary["category_counts"]
-        cat_df = pd.DataFrame([
-            {"category": k.replace("_", " ").title(), "count": v}
-            for k, v in cat_data.items()
-        ]).sort_values("count", ascending=True)
-
-        if not cat_df.empty:
-            fig_cat = px.bar(
-                cat_df, x="count", y="category",
-                orientation="h",
-                color_discrete_sequence=["#38bdf8"],
-                template="plotly_dark",
-            )
-            fig_cat.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Inter", color="#94a3b8"),
-                showlegend=False,
-                margin=dict(l=20, r=20, t=20, b=40),
-                xaxis=dict(gridcolor="rgba(56,189,248,0.05)"),
-                yaxis=dict(gridcolor="rgba(56,189,248,0.05)"),
-                height=300,
-            )
-            st.plotly_chart(fig_cat, use_container_width=True)
-
-    # MITRE techniques observed
-    mitre_techs = summary.get("mitre_techniques", [])
-    if mitre_techs:
-        st.markdown("""
-        <div class="section-header">
-            <span class="section-icon">🎯</span>
-            <h2>MITRE ATT&CK Techniques Observed</h2>
-        </div>
-        """, unsafe_allow_html=True)
-
-        mitre_html = " ".join(
-            f'<span class="mitre-badge" style="margin:4px;">{sanitize_html(t)}</span>'
-            for t in mitre_techs
-        )
-        st.markdown(
-            f'<div class="fade-in" style="padding:1rem 0;">{mitre_html}</div>',
-            unsafe_allow_html=True,
-        )
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 1: Timeline
-# ═══════════════════════════════════════════════════════════════
-
+# ── Timeline ───────────────────────────────────────────────
 with tabs[1]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">🕒</span>
-        <h2>Chronological Event Timeline</h2>
-        <span class="section-badge badge-blue">CHRONOLOGICAL</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    view_mode = st.radio(
-        "View Mode", ["Visual Timeline", "Data Table"],
-        horizontal=True, label_visibility="collapsed",
-    )
-
-    if view_mode == "Visual Timeline":
-        timeline_html = '<div class="timeline-container stagger">'
-        for i, event in enumerate(timeline):
-            safe_event = {
-                k: sanitize_html(str(v)) if isinstance(v, str) else v
-                for k, v in event.items()
-            }
-            timeline_html += render_timeline_event(safe_event, i)
-        timeline_html += '</div>'
-        st.markdown(timeline_html, unsafe_allow_html=True)
+    st.markdown(render_section("🕒", "Chronological event timeline", "CHRONOLOGICAL"), unsafe_allow_html=True)
+    mode = st.radio("View", ["Visual timeline", "Data table"], horizontal=True, label_visibility="collapsed")
+    if mode == "Visual timeline":
+        shown = timeline[:300]
+        st.markdown('<div class="tl">' + "".join(render_timeline_event(e, i) for i, e in enumerate(shown)) + "</div>",
+                    unsafe_allow_html=True)
+        if len(timeline) > len(shown):
+            st.caption(f"Showing the first {len(shown)} of {len(timeline)} events. Use the data table for all.")
     else:
-        st.dataframe(
-            pd.DataFrame(timeline),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(pd.DataFrame(timeline), hide_index=True, **STRETCH)
 
-    # Timeline heatmap
-    st.markdown("""
-    <div class="section-header" style="margin-top:2rem;">
-        <span class="section-icon">🌡️</span>
-        <h2>Event Density Heatmap</h2>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(render_section("🌡️", "Severity heatmap by minute"), unsafe_allow_html=True)
+    hdf = pd.DataFrame(timeline)
+    hdf["t"] = pd.to_datetime(hdf["time"], errors="coerce", utc=True)
+    hdf = hdf.dropna(subset=["t"])
+    if hdf.empty:
+        st.caption("No parseable timestamps — heatmap unavailable.")
+    else:
+        hdf["minute"] = hdf["t"].dt.floor("min")
+        hdf["sev"] = hdf["severity"].map({"low": 1, "medium": 2, "high": 3, "critical": 4})
+        piv = hdf.pivot_table(index="category", columns="minute", values="sev", aggfunc="max").sort_index(axis=1)
+        fig = go.Figure(go.Heatmap(
+            z=piv.values, x=[m.strftime("%H:%M") for m in piv.columns], y=[c.replace("_", " ") for c in piv.index],
+            colorscale=[[0, "#4ade80"], [.33, "#fbbf24"], [.66, "#ff9f43"], [1, "#ff5d5d"]], zmin=1, zmax=4,
+            xgap=2, ygap=2, colorbar=dict(title="Severity", tickvals=[1, 2, 3, 4],
+                                          ticktext=["low", "medium", "high", "critical"])))
+        fig.update_xaxes(type="category")
+        chart(style_fig(fig, 300))
 
-    heat_df = pd.DataFrame(timeline)
-    if "time" in heat_df.columns and not heat_df.empty:
-        heat_df["parsed_time"] = pd.to_datetime(heat_df["time"], errors="coerce")
-        heat_df = heat_df.dropna(subset=["parsed_time"])
-
-        if not heat_df.empty:
-            heat_df["minute"] = heat_df["parsed_time"].dt.strftime("%H:%M")
-            heat_df["sev_num"] = heat_df["severity"].map(
-                {"low": 1, "medium": 2, "high": 3, "critical": 4}
-            )
-
-            heat_pivot = heat_df.groupby(["category", "minute"])["sev_num"] \
-                                .max().reset_index()
-
-            if not heat_pivot.empty:
-                fig_heat = px.density_heatmap(
-                    heat_pivot, x="minute", y="category",
-                    z="sev_num",
-                    color_continuous_scale=["#0c1828", "#22c55e", "#eab308",
-                                           "#f97316", "#ef4444"],
-                    template="plotly_dark",
-                )
-                fig_heat.update_layout(
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    font=dict(family="Inter", color="#94a3b8"),
-                    margin=dict(l=20, r=20, t=20, b=40),
-                    height=280,
-                    coloraxis_colorbar=dict(title="Severity"),
-                )
-                st.plotly_chart(fig_heat, use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 2: Patterns & MITRE
-# ═══════════════════════════════════════════════════════════════
-
+# ── Patterns & MITRE ───────────────────────────────────────
 with tabs[2]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">🔎</span>
-        <h2>Correlated Patterns & MITRE ATT&CK Mapping</h2>
-        <span class="section-badge badge-amber">CORRELATION ENGINE</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(render_section("🔎", "Correlated patterns & MITRE ATT&CK", "CORRELATION ENGINE", "amber"),
+                unsafe_allow_html=True)
     if patterns:
-        for p in patterns:
-            safe_p = {
-                k: sanitize_html(str(v)) if isinstance(v, str) else v
-                for k, v in p.items()
-            }
-            mitre = p.get("mitre")
-            st.markdown(render_pattern_card(safe_p, mitre), unsafe_allow_html=True)
+        for p in sorted(patterns, key=lambda p: -{"low": 1, "medium": 2, "high": 3, "critical": 4}[p["severity"]]):
+            st.markdown(render_pattern_card(p), unsafe_allow_html=True)
     else:
-        st.info("No strong repeated-activity pattern met the baseline correlation "
-                "thresholds.")
+        st.markdown(render_empty("radar.svg", "No correlated patterns",
+                                 "No repeated-activity pattern met the correlation thresholds."), unsafe_allow_html=True)
+    rows = [{"tactic": e["mitre"]["tactic"], "technique": e["mitre"]["technique"]}
+            for e in events if e["mitre"]["technique"] != "N/A"]
+    if rows:
+        st.markdown(render_section("🗺️", "MITRE ATT&CK coverage"), unsafe_allow_html=True)
+        counts = pd.DataFrame(rows).groupby(["tactic", "technique"]).size().reset_index(name="count")
+        fig = px.treemap(counts, path=["tactic", "technique"], values="count", color="count",
+                         color_continuous_scale=["#12303a", "#2dd4bf", "#ff5d5d"])
+        fig.update_layout(coloraxis_showscale=False)
+        chart(style_fig(fig, 340))
 
-    # MITRE heatmap
-    if events:
-        st.markdown("""
-        <div class="section-header" style="margin-top:2rem;">
-            <span class="section-icon">🗺️</span>
-            <h2>MITRE ATT&CK Coverage Map</h2>
-        </div>
-        """, unsafe_allow_html=True)
-
-        mitre_data = []
-        for e in events:
-            m = e.get("mitre", {})
-            if m.get("technique") != "N/A":
-                mitre_data.append({
-                    "tactic": m.get("tactic", "Unknown"),
-                    "technique": m.get("technique", "N/A"),
-                    "severity": e["severity"],
-                })
-
-        if mitre_data:
-            mitre_df = pd.DataFrame(mitre_data)
-            mitre_count = mitre_df.groupby(["tactic", "technique"]).size() \
-                                  .reset_index(name="count")
-
-            fig_mitre = px.treemap(
-                mitre_count,
-                path=["tactic", "technique"],
-                values="count",
-                color="count",
-                color_continuous_scale=["#0c1828", "#38bdf8", "#ef4444"],
-                template="plotly_dark",
-            )
-            fig_mitre.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Inter", color="#e2e8f0"),
-                margin=dict(l=10, r=10, t=10, b=10),
-                height=350,
-            )
-            st.plotly_chart(fig_mitre, use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 3: IOC Extraction
-# ═══════════════════════════════════════════════════════════════
-
+# ── IOCs ───────────────────────────────────────────────────
 with tabs[3]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">🎯</span>
-        <h2>Extracted Indicators of Compromise</h2>
-        <span class="section-badge badge-red">THREAT INTELLIGENCE</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(render_section("🎯", "Extracted indicators of compromise", "THREAT INTEL", "red"),
+                unsafe_allow_html=True)
     if iocs:
-        ioc_type_icons = {
-            "ipv4": "🌐", "domain": "🔗", "url": "🔗",
-            "md5": "#️⃣", "sha1": "#️⃣", "sha256": "#️⃣",
-            "email": "📧",
-        }
-
-        ioc_type_css = {
-            "ipv4": "ioc-ip", "domain": "ioc-domain", "url": "ioc-url",
-            "md5": "ioc-hash", "sha1": "ioc-hash", "sha256": "ioc-hash",
-            "email": "ioc-domain",
-        }
-
-        # Summary by type
-        ioc_summary_cols = st.columns(4)
-        ioc_types = {}
-        for ioc in iocs:
-            t = ioc["type"]
-            ioc_types[t] = ioc_types.get(t, 0) + 1
-
-        for i, (t, count) in enumerate(ioc_types.items()):
-            with ioc_summary_cols[i % 4]:
-                icon = ioc_type_icons.get(t, "📌")
-                st.markdown(
-                    render_metric_card(icon, count, f"{t.upper()} IOCs", "amber"),
-                    unsafe_allow_html=True,
-                )
-
-        st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
-
-        # IOC table
-        for ioc in iocs:
-            css_class = ioc_type_css.get(ioc["type"], "ioc-ip")
-            icon = ioc_type_icons.get(ioc["type"], "📌")
-            event_ids = ", ".join(f"#{eid}" for eid in ioc["event_ids"])
-            st.markdown(f"""
-            <div class="pattern-card" style="border-left-color: #38bdf8;">
-                <div style="display:flex;align-items:center;gap:0.8rem;">
-                    <span style="font-size:1.3rem;">{icon}</span>
-                    <span class="ioc-tag {css_class}">{ioc['type'].upper()}</span>
-                    <code style="color:#38bdf8;font-size:0.9rem;">
-                        {sanitize_html(ioc['value'])}
-                    </code>
-                </div>
-                <div class="pattern-detail" style="margin-top:0.5rem;">
-                    Referenced in events: <strong>{event_ids}</strong>
-                    &nbsp;•&nbsp; Occurrences: <strong>{ioc['count']}</strong>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        by_type: dict[str, int] = {}
+        for i in iocs:
+            by_type[i["type"]] = by_type.get(i["type"], 0) + 1
+        mc = st.columns(max(2, min(len(by_type), 5)))
+        for n, (t, c) in enumerate(by_type.items()):
+            mc[n % len(mc)].markdown(render_metric_card("📌", c, f"{t.upper()} indicators", "amber"),
+                                     unsafe_allow_html=True)
+        st.caption("Indicators are shown defanged. Internal and private addresses are excluded.")
+        for i in iocs:
+            st.markdown(render_ioc_card(i), unsafe_allow_html=True)
     else:
-        st.info("No external IOCs (public IPs, domains, hashes, URLs) were "
-                "extracted from the current alert set.")
+        st.markdown(render_empty("radar.svg", "No external indicators",
+                                 "No public IPs, domains, URLs, hashes or e-mails were found."), unsafe_allow_html=True)
 
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 4: Alert Data
-# ═══════════════════════════════════════════════════════════════
-
+# ── Alert data ─────────────────────────────────────────────
 with tabs[4]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">🧪</span>
-        <h2>Normalized SIEM Events</h2>
-        <span class="section-badge badge-blue">RAW DATA</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Filters
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
-    with filter_col1:
-        sev_filter = st.multiselect(
-            "Filter by Severity",
-            ["low", "medium", "high", "critical"],
-            default=["low", "medium", "high", "critical"],
-        )
-    with filter_col2:
-        all_cats = sorted({e["category"] for e in events})
-        cat_filter = st.multiselect("Filter by Category", all_cats, default=all_cats)
-    with filter_col3:
-        all_sources = sorted({e["source_ip"] for e in events if e["source_ip"]})
-        src_filter = st.multiselect("Filter by Source IP", all_sources,
-                                    default=all_sources)
-
-    filtered = [
-        e for e in events
-        if e["severity"] in sev_filter
-        and e["category"] in cat_filter
-        and (e["source_ip"] in src_filter or not e["source_ip"])
-    ]
-
-    display_df = pd.DataFrame(filtered)
-    # Drop raw_text and mitre dict for cleaner display
-    drop_cols = [c for c in ["raw_text", "mitre"] if c in display_df.columns]
-    if drop_cols:
-        display_df = display_df.drop(columns=drop_cols)
-
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.markdown(render_section("🧪", "Normalized SIEM events", "RAW DATA"), unsafe_allow_html=True)
+    f1, f2, f3 = st.columns(3)
+    sev_f = f1.multiselect("Severity", ["low", "medium", "high", "critical"], default=["low", "medium", "high", "critical"])
+    cats = sorted({e["category"] for e in events})
+    cat_f = f2.multiselect("Category", cats, default=cats)
+    srcs = sorted({e["source_ip"] for e in events if e["source_ip"]})
+    src_f = f3.multiselect("Source IP", srcs, default=srcs)
+    filtered = [e for e in events if e["severity"] in sev_f and e["category"] in cat_f
+                and (not e["source_ip"] or e["source_ip"] in src_f)]
+    st.dataframe(event_frame(filtered), hide_index=True, **STRETCH)
     st.caption(f"Showing {len(filtered)} of {len(events)} events")
 
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 5: Investigation Checklist
-# ═══════════════════════════════════════════════════════════════
-
+# ── Checklist ──────────────────────────────────────────────
 with tabs[5]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">✅</span>
-        <h2>Analyst Investigation Checklist</h2>
-        <span class="section-badge badge-green">RESPONSE GUIDE</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Progress tracking
-    completed = sum(
-        1 for item in checklist
-        if st.session_state.get(f"check_{item['id']}", False)
-    )
-    progress_pct = int((completed / len(checklist)) * 100) if checklist else 0
-
-    st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;">
-        <span style="color:#94a3b8;font-size:0.85rem;">
-            Progress: {completed}/{len(checklist)} steps completed
-        </span>
-        <span style="color:#38bdf8;font-family:'JetBrains Mono',monospace;
-                     font-size:0.85rem;">
-            {progress_pct}%
-        </span>
-    </div>
-    <div class="checklist-progress">
-        <div class="checklist-progress-bar" style="width:{progress_pct}%;"></div>
-    </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(render_section("✅", "Analyst investigation checklist", "RESPONSE GUIDE", "green"),
+                unsafe_allow_html=True)
+    done = sum(1 for i in checklist if st.session_state.get(f"check_{data_sig}_{i['id']}", False))
+    pct = int(done / len(checklist) * 100) if checklist else 0
+    st.markdown(f'<div class="meta mono" style="color:#8aa0b2">{done}/{len(checklist)} steps · {pct}%</div>'
+                f'<div class="progress"><div style="width:{pct}%"></div></div>', unsafe_allow_html=True)
     for item in checklist:
-        col_check, col_content = st.columns([0.05, 0.95])
-        with col_check:
-            st.checkbox(
-                "Done", value=False, key=f"check_{item['id']}",
-                label_visibility="collapsed",
-            )
-        with col_content:
-            st.markdown(render_checklist_item(item), unsafe_allow_html=True)
+        a, b = st.columns([0.05, 0.95])
+        a.checkbox("Done", key=f"check_{data_sig}_{item['id']}", label_visibility="collapsed")
+        b.markdown(render_checklist_item(item), unsafe_allow_html=True)
+    st.caption("Progress lasts for this browser session. Export the report to keep your findings.")
 
-    st.caption(
-        "Checking an item records analyst review in the current browser session. "
-        "Export the incident report to preserve your findings."
-    )
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 6: Report & Export
-# ═══════════════════════════════════════════════════════════════
-
+# ── AI advisory ────────────────────────────────────────────
 with tabs[6]:
-    st.markdown("""
-    <div class="section-header">
-        <span class="section-icon">📄</span>
-        <h2>Incident Report & Export</h2>
-        <span class="section-badge badge-blue">EXPORTABLE</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(render_section("🤖", "AI advisory narrative", "OPTIONAL · ANY PROVIDER", "violet"),
+                unsafe_allow_html=True)
+    left, right = st.columns([0.28, 0.72])
+    left.markdown(render_art_side("ai_core.svg", "AI provider connection"), unsafe_allow_html=True)
+    with right:
+        if not st.session_state.llm_enabled:
+            st.info("Turn on **Enable AI advisory narrative** in the sidebar, then choose any provider — OpenAI, "
+                    "Anthropic, Gemini, Groq, OpenRouter, Ollama, or your own endpoint.")
+        else:
+            cfg = current_config()
+            host = urlparse(cfg.base_url).hostname or "—"
+            st.markdown(
+                f'<div class="panel violet"><div class="cap">Active provider</div>'
+                f'<b>{sanitize_html(PROVIDERS[cfg.provider]["label"])}</b> · model '
+                f'<code>{sanitize_html(cfg.model or "—")}</code> · host <code>{sanitize_html(host)}</code> · key '
+                f'{"set" if cfg.api_key else "not set"}</div>', unsafe_allow_html=True)
+            if not cfg.is_ready():
+                st.warning("Add a base URL, model and API key in the sidebar to continue.")
+            sig = f"{data_sig}|{cfg.provider}|{cfg.model}|{cfg.base_url}"
+            if st.button("Generate advisory", type="primary", disabled=not cfg.is_ready()):
+                with st.spinner(f"Asking {PROVIDERS[cfg.provider]['label']}…"):
+                    try:
+                        text = generate_llm_summary(events, summary, patterns, cfg)
+                        st.session_state.advisory = {"sig": sig, "text": text, "meta": cfg.public_dict(),
+                                                     "at": datetime.now(timezone.utc).isoformat()}
+                    except LLMError as exc:
+                        st.session_state.advisory = None
+                        st.error(sanitize_llm_output(str(exc)))
+            adv = st.session_state.advisory
+            if adv:
+                if adv["sig"] != sig:
+                    st.caption("This narrative was generated for different data or settings.")
+                with st.container(border=True):
+                    st.markdown(adv["text"])
+                st.caption("Advisory only — may contain errors. Validate against primary evidence.")
 
+# ── Enterprise Tiers ───────────────────────────────────────
+with tabs[7]:
+    st.markdown(render_section("💎", "Enterprise Subscriptions & Integrations", "FORTUNE 500 READY", "violet"),
+                unsafe_allow_html=True)
+    st.markdown(render_company_showcase(), unsafe_allow_html=True)
+
+    col_sub1, col_sub2 = st.columns(2)
+    with col_sub1:
+        st.markdown(render_plan_card(
+            tier_key="pro_ulta",
+            name="Pro Ulta Tier",
+            badge="⚡ High Performance SOC",
+            price="$2,499",
+            period="/ month / cluster",
+            desc="Built for dedicated threat intelligence teams and fast-paced Tier-2/3 SOC triage.",
+            features=[
+                "Real-time streaming SIEM alert ingestion (up to 250,000 events/sec)",
+                "Full MITRE ATT&CK v14 automated mapping & heatmaps",
+                "Advanced regex & heuristic Prompt Injection defenses",
+                "Google Chronicle & GCP Cloud Security Command Center connector",
+                "Automated IOC defanging & CSV/JSON timeline generation",
+                "Enterprise SLA: 99.95% uptime with 15-minute response guarantee"
+            ],
+            enterprise_clients="Deployments: Google Cloud Infrastructure & High-Frequency FinTech"
+        ), unsafe_allow_html=True)
+        if st.button("🚀 Upgrade to Pro Ulta", key="btn_pro_ulta", **STRETCH):
+            st.success("🎉 Enterprise provisioning initiated! Token generated for Google Cloud / On-Premise SIEM integration.")
+
+    with col_sub2:
+        st.markdown(render_plan_card(
+            tier_key="pro_max_ulta",
+            name="Pro Max Ulta Tier",
+            badge="🛡️ Sovereign Military-Grade Defenses",
+            price="$8,999",
+            period="/ month / tenant",
+            desc="The ultimate cyber defensive suite trusted across global tech conglomerates and defense contractors.",
+            features=[
+                "Unlimited event throughput with multi-cloud distributed correlation",
+                "Microsoft Sentinel, Defender XDR & Azure Active Directory full bidirectional sync",
+                "Zero-Trust LLM sandbox protecting against multi-hop adversarial prompt injections",
+                "Automated kill-chain disruption and custom Yara / Sigma rule synthesis",
+                "CrowdStrike Falcon & Palo Alto Cortex XSOAR instant webhook dispatchers",
+                "Dedicated 24/7 Red/Blue Team engineering squad & air-gapped deployment option"
+            ],
+            enterprise_clients="Deployments: Microsoft Azure Core Defense, Amazon AWS & Fortune 50 Banks"
+        ), unsafe_allow_html=True)
+        if st.button("🔥 Upgrade to Pro Max Ulta", key="btn_pro_max_ulta", type="primary", **STRETCH):
+            st.balloons()
+            st.success("👑 Elite Pro Max Ulta license activated! Direct bridge established for Microsoft Defender & Chronicle SOC clusters.")
+
+# ── Report & export ────────────────────────────────────────
+with tabs[8]:
+    st.markdown(render_section("📄", "Incident report & export", "EXPORTABLE"), unsafe_allow_html=True)
     report = build_report(result)
+    adv = st.session_state.advisory
+    report["llm_advisory"] = adv["text"] if adv else None
+    report["llm_provider"] = adv["meta"] if adv else None  # never includes the API key
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    e1, e2 = st.columns(2)
+    e1.download_button("⬇️ Download JSON incident report",
+                       json.dumps(report, indent=2, default=str).encode("utf-8"),
+                       file_name=f"aegistrace_incident_{stamp}.json", mime="application/json", **STRETCH)
+    safe_csv = event_frame(events).map(csv_safe)  # blocks spreadsheet formula injection
+    e2.download_button("⬇️ Download events CSV", safe_csv.to_csv(index=False).encode("utf-8"),
+                       file_name=f"aegistrace_events_{stamp}.csv", mime="text/csv", **STRETCH)
+    with st.expander("View full JSON report"):
+        st.json(report, expanded=False)
 
-    if use_llm and llm_available():
-        with st.spinner("🤖 Generating advisory narrative..."):
-            report["llm_advisory"] = generate_llm_summary(events, summary, patterns)
-    else:
-        report["llm_advisory"] = None
-
-    # LLM narrative display
-    if report.get("llm_advisory"):
-        st.markdown("""
-        <div class="section-header">
-            <span class="section-icon">🤖</span>
-            <h2>AI Advisory Narrative</h2>
-            <span class="section-badge badge-amber">LLM GENERATED</span>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown(
-            f'<div class="metric-glass purple fade-in">'
-            f'<div style="color:#cbd5e1;line-height:1.8;font-size:0.92rem;">'
-            f'{sanitize_html(report["llm_advisory"])}</div></div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("⚠️ This narrative is advisory only and may contain inaccuracies. "
-                   "Always validate with primary evidence.")
-
-    report_bytes = json.dumps(report, indent=2, default=str).encode("utf-8")
-
-    # Export buttons
-    exp_col1, exp_col2 = st.columns(2)
-    with exp_col1:
-        st.download_button(
-            "⬇️ Download JSON Incident Report",
-            data=report_bytes,
-            file_name=f"aegistrace_incident_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json",
-        )
-    with exp_col2:
-        # CSV export of events
-        csv_data = pd.DataFrame(events)
-        drop_cols = [c for c in ["raw_text", "mitre"] if c in csv_data.columns]
-        if drop_cols:
-            csv_data = csv_data.drop(columns=drop_cols)
-        st.download_button(
-            "⬇️ Download Events CSV",
-            data=csv_data.to_csv(index=False).encode("utf-8"),
-            file_name=f"aegistrace_events_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-        )
-
-    # Collapsible full JSON
-    with st.expander("📋 View Full JSON Report"):
-        st.json(report)
-
-
-# ─────────────────────────────────────────────────────────────
-# Footer
-# ─────────────────────────────────────────────────────────────
-
-st.markdown(f"""
-<div class="app-footer">
-    🛡️ <strong>AegisTrace AI</strong> — Defensive SOC Triage Platform
-    &nbsp;•&nbsp;
-    <span class="footer-version">v2.0.0</span>
-    &nbsp;•&nbsp;
-    Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-    <br/>
-    <span style="color:#334155;font-size:0.72rem;">
-        All response actions require analyst review. This tool does not execute
-        commands, access endpoints, or perform automated containment.
-    </span>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(render_footer(VERSION, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")),
+            unsafe_allow_html=True)
