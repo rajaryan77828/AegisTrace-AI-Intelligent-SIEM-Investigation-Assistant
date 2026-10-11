@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 140" role="img" aria-label="AI provider connection illustration">
+  <style>
+    .l{stroke:#2b4a5e;stroke-width:1.5;fill:none}
+    .p{stroke:#a78bfa;stroke-width:2;fill:none;stroke-dasharray:6 6;animation:f 1.4s linear infinite}
+    .n{fill:#101c27;stroke:#a78bfa;stroke-width:2}
+    .c{fill:#a78bfa;transform-box:fill-box;transform-origin:center;animation:b 2s ease-in-out infinite}
+    @keyframes f{to{stroke-dashoffset:-24}}
+    @keyframes b{50%{transform:scale(1.35);opacity:.65}}
+    @media (prefers-reduced-motion:reduce){.p,.c{animation:none}}
+  </style>
+  <path class="l" d="M30 30 L110 70 L30 110"/><path class="l" d="M210 30 L130 70 L210 110"/>
+  <path class="p" d="M30 30 L110 70"/><path class="p" d="M30 110 L110 70"/>
+  <path class="p" d="M130 70 L210 30"/><path class="p" d="M130 70 L210 110"/>
+  <circle class="n" cx="30" cy="30" r="10"/><circle class="n" cx="30" cy="110" r="10"/>
+  <circle class="n" cx="210" cy="30" r="10"/><circle class="n" cx="210" cy="110" r="10"/>
+  <rect class="n" x="100" y="48" width="40" height="44" rx="10"/><circle class="c" cx="120" cy="70" r="7"/>
+</svg>

@@ -13,8 +13,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except ImportError:
+    px = None
+    go = None
+    HAS_PLOTLY = False
 import streamlit as st
 
 from analyzer import VERSION, analyze_events, build_report
@@ -65,19 +71,9 @@ def _on_provider_change() -> None:
 
 
 def current_config() -> LLMConfig:
-    s = st.session_state
-    key = (s.llm_api_key or "").strip()
-    # A server-side key is only ever used with the server's own endpoint, so a visitor
-    # cannot redirect it to an attacker-controlled URL.
-    if not key and (s.llm_provider == _ENV_CFG.provider and s.llm_protocol == _ENV_CFG.protocol
-                    and s.llm_base_url.rstrip("/") == _ENV_CFG.base_url.rstrip("/")):
-        key = _ENV_CFG.api_key
-    return LLMConfig(
-        provider=s.llm_provider, protocol=s.llm_protocol, base_url=s.llm_base_url.strip(),
-        model=s.llm_model.strip(), api_key=key, temperature=float(s.llm_temperature),
-        max_tokens=int(s.llm_max_tokens), timeout=int(s.llm_timeout),
-        auth_header=s.llm_auth_header.strip(), auth_prefix=s.llm_auth_prefix,
-    )
+    # Strictly lock down API configuration to server-side environment / secrets.
+    # No user or attacker can supply or modify API keys or targets via the frontend.
+    return _ENV_CFG
 
 
 _init_llm_state()
@@ -98,42 +94,30 @@ with st.sidebar:
     demo = st.radio("Demo dataset", ["JSON — multi-stage intrusion", "CSV — brute force"],
                     horizontal=False, help="Used when nothing is uploaded or pasted.")
 
-    st.markdown('<div class="side-h">AI provider</div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-h">AI advisory engine</div>', unsafe_allow_html=True)
+    server_configured = _ENV_CFG.is_ready()
     st.toggle("Enable AI advisory narrative", key="llm_enabled",
-              help="Off by default. Nothing is sent to any provider unless you click Generate.")
+              help="Advisory summaries generated using server-side security credentials.")
     if st.session_state.llm_enabled:
-        st.selectbox("Provider", list(PROVIDERS), key="llm_provider", on_change=_on_provider_change,
-                     format_func=lambda k: PROVIDERS[k]["label"])
-        preset = PROVIDERS[st.session_state.llm_provider]
-        st.text_input("Base URL", key="llm_base_url", placeholder="https://api.example.com/v1")
-        st.text_input("Model", key="llm_model",
-                      help="Any model id your provider supports." + (
-                          f" Suggestions: {', '.join(preset['models'][:4])}" if preset["models"] else ""))
-        st.text_input("API key", key="llm_api_key", type="password",
-                      placeholder="Leave empty for local models" if not preset["key_required"] else "sk-…",
-                      help="Kept in this browser session's memory only. Never saved or exported.")
-        with st.expander("Advanced"):
-            st.selectbox("Protocol", list(PROTOCOL_LABELS), key="llm_protocol",
-                         format_func=PROTOCOL_LABELS.get,
-                         help="Pick the request format your endpoint speaks.")
-            st.slider("Temperature", 0.0, 1.0, key="llm_temperature", step=0.05)
-            st.number_input("Max output tokens", 200, 8000, key="llm_max_tokens", step=100)
-            st.number_input("Timeout (s)", 10, 300, key="llm_timeout", step=10)
-            st.text_input("Custom auth header", key="llm_auth_header", placeholder="e.g. X-API-Key",
-                          help="Leave empty to use the protocol default.")
-            st.text_input("Auth value prefix", key="llm_auth_prefix", placeholder="e.g. Bearer ")
-        c1, c2 = st.columns(2)
-        if c1.button("Test connection", **STRETCH):
-            with st.spinner("Testing…"):
-                st.session_state.llm_test = test_connection(current_config())
-        if c2.button("Clear key", **STRETCH):
-            st.session_state.llm_api_key = ""
-            st.session_state.llm_test = None
-            st.rerun()
-        test = st.session_state.llm_test
-        if test:
-            (st.success if test[0] else st.error)(sanitize_llm_output(test[1]))
-        st.caption("Alert content is sent to the provider you choose. SIEM text is wrapped as untrusted "
+        if server_configured:
+            st.markdown(
+                f'<div style="font:600 0.8rem var(--mono);color:var(--teal);margin-bottom:.4rem;">'
+                f'🔒 Server Key Active: {sanitize_html(PROVIDERS.get(_ENV_CFG.provider, {}).get("label", _ENV_CFG.provider))}</div>'
+                f'<div style="font-size:0.75rem;color:var(--muted);">'
+                f'Model: <code>{sanitize_html(_ENV_CFG.model)}</code><br/>'
+                f'API keys & endpoints are managed securely via server secrets (.env / cloud secrets). '
+                f'Frontend API key inputs are strictly disabled for security.</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Test server connection", **STRETCH):
+                with st.spinner("Verifying backend provider…"):
+                    st.session_state.llm_test = test_connection(_ENV_CFG)
+            test = st.session_state.llm_test
+            if test:
+                (st.success if test[0] else st.error)(sanitize_llm_output(test[1]))
+        else:
+            st.warning("⚠️ No backend API key configured. API keys must be set on the server via `.env` or Streamlit Secrets (`AEGIS_API_KEY`). Frontend key inputs are disabled.")
+        st.caption("SIEM text is isolated as untrusted data. AI narrative remains advisory only.")
                    "data and the reply is advisory only.")
 
     st.markdown('<div class="side-h">About</div>', unsafe_allow_html=True)
@@ -216,7 +200,9 @@ for col, card in zip(cols, cards):
 st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
 
 
-def style_fig(fig: go.Figure, height: int = 300) -> go.Figure:
+def style_fig(fig, height: int = 300):
+    if not HAS_PLOTLY or fig is None:
+        return None
     fig.update_layout(
         template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         font=dict(family="IBM Plex Sans, system-ui, sans-serif", color="#8aa0b2"),
@@ -226,8 +212,9 @@ def style_fig(fig: go.Figure, height: int = 300) -> go.Figure:
     return fig
 
 
-def chart(fig: go.Figure) -> None:
-    st.plotly_chart(fig, config={"displayModeBar": False}, **STRETCH)
+def chart(fig) -> None:
+    if HAS_PLOTLY and fig is not None:
+        st.plotly_chart(fig, config={"displayModeBar": False}, **STRETCH)
 
 
 def event_frame(evs: list[dict]) -> pd.DataFrame:
@@ -252,15 +239,21 @@ with tabs[0]:
         sev_df = pd.DataFrame([{"severity": s, "count": summary["severity_counts"].get(s, 0)}
                                for s in ("low", "medium", "high", "critical")
                                if summary["severity_counts"].get(s, 0)])
-        fig = px.bar(sev_df, x="severity", y="count", color="severity",
-                     color_discrete_map={"low": "#4ade80", "medium": "#fbbf24", "high": "#ff9f43", "critical": "#ff5d5d"})
-        chart(style_fig(fig))
+        if HAS_PLOTLY:
+            fig = px.bar(sev_df, x="severity", y="count", color="severity",
+                         color_discrete_map={"low": "#4ade80", "medium": "#fbbf24", "high": "#ff9f43", "critical": "#ff5d5d"})
+            chart(style_fig(fig))
+        elif not sev_df.empty:
+            st.bar_chart(sev_df.set_index("severity")["count"], **STRETCH)
     with c2:
         st.markdown(render_section("🗂️", "Event categories"), unsafe_allow_html=True)
         cat_df = pd.DataFrame([{"category": k.replace("_", " ").title(), "count": v}
                                for k, v in summary["category_counts"].items()]).sort_values("count")
-        fig = px.bar(cat_df, x="count", y="category", orientation="h", color_discrete_sequence=["#2dd4bf"])
-        chart(style_fig(fig))
+        if HAS_PLOTLY:
+            fig = px.bar(cat_df, x="count", y="category", orientation="h", color_discrete_sequence=["#2dd4bf"])
+            chart(style_fig(fig))
+        elif not cat_df.empty:
+            st.bar_chart(cat_df.set_index("category")["count"], **STRETCH)
 
     if summary["mitre_techniques"]:
         st.markdown(render_section("🎯", "MITRE ATT&CK techniques observed"), unsafe_allow_html=True)
@@ -291,13 +284,16 @@ with tabs[1]:
         hdf["minute"] = hdf["t"].dt.floor("min")
         hdf["sev"] = hdf["severity"].map({"low": 1, "medium": 2, "high": 3, "critical": 4})
         piv = hdf.pivot_table(index="category", columns="minute", values="sev", aggfunc="max").sort_index(axis=1)
-        fig = go.Figure(go.Heatmap(
-            z=piv.values, x=[m.strftime("%H:%M") for m in piv.columns], y=[c.replace("_", " ") for c in piv.index],
-            colorscale=[[0, "#4ade80"], [.33, "#fbbf24"], [.66, "#ff9f43"], [1, "#ff5d5d"]], zmin=1, zmax=4,
-            xgap=2, ygap=2, colorbar=dict(title="Severity", tickvals=[1, 2, 3, 4],
-                                          ticktext=["low", "medium", "high", "critical"])))
-        fig.update_xaxes(type="category")
-        chart(style_fig(fig, 300))
+        if HAS_PLOTLY:
+            fig = go.Figure(go.Heatmap(
+                z=piv.values, x=[m.strftime("%H:%M") for m in piv.columns], y=[c.replace("_", " ") for c in piv.index],
+                colorscale=[[0, "#4ade80"], [.33, "#fbbf24"], [.66, "#ff9f43"], [1, "#ff5d5d"]], zmin=1, zmax=4,
+                xgap=2, ygap=2, colorbar=dict(title="Severity", tickvals=[1, 2, 3, 4],
+                                              ticktext=["low", "medium", "high", "critical"])))
+            fig.update_xaxes(type="category")
+            chart(style_fig(fig, 300))
+        else:
+            st.dataframe(piv, **STRETCH)
 
 # ── Patterns & MITRE ───────────────────────────────────────
 with tabs[2]:
@@ -314,10 +310,13 @@ with tabs[2]:
     if rows:
         st.markdown(render_section("🗺️", "MITRE ATT&CK coverage"), unsafe_allow_html=True)
         counts = pd.DataFrame(rows).groupby(["tactic", "technique"]).size().reset_index(name="count")
-        fig = px.treemap(counts, path=["tactic", "technique"], values="count", color="count",
-                         color_continuous_scale=["#12303a", "#2dd4bf", "#ff5d5d"])
-        fig.update_layout(coloraxis_showscale=False)
-        chart(style_fig(fig, 340))
+        if HAS_PLOTLY:
+            fig = px.treemap(counts, path=["tactic", "technique"], values="count", color="count",
+                             color_continuous_scale=["#12303a", "#2dd4bf", "#ff5d5d"])
+            fig.update_layout(coloraxis_showscale=False)
+            chart(style_fig(fig, 340))
+        else:
+            st.dataframe(counts.sort_values("count", ascending=False), hide_index=True, **STRETCH)
 
 # ── IOCs ───────────────────────────────────────────────────
 with tabs[3]:
@@ -374,21 +373,22 @@ with tabs[6]:
     left.markdown(render_art_side("ai_core.svg", "AI provider connection"), unsafe_allow_html=True)
     with right:
         if not st.session_state.llm_enabled:
-            st.info("Turn on **Enable AI advisory narrative** in the sidebar, then choose any provider — OpenAI, "
-                    "Anthropic, Gemini, Groq, OpenRouter, Ollama, or your own endpoint.")
+            st.info("Turn on **Enable AI advisory narrative** in the sidebar to activate the backend LLM engine.")
         else:
             cfg = current_config()
             host = urlparse(cfg.base_url).hostname or "—"
-            st.markdown(
-                f'<div class="panel violet"><div class="cap">Active provider</div>'
-                f'<b>{sanitize_html(PROVIDERS[cfg.provider]["label"])}</b> · model '
-                f'<code>{sanitize_html(cfg.model or "—")}</code> · host <code>{sanitize_html(host)}</code> · key '
-                f'{"set" if cfg.api_key else "not set"}</div>', unsafe_allow_html=True)
-            if not cfg.is_ready():
-                st.warning("Add a base URL, model and API key in the sidebar to continue.")
+            if cfg.is_ready():
+                st.markdown(
+                    f'<div class="panel violet"><div class="cap">Backend Security Active</div>'
+                    f'<b>{sanitize_html(PROVIDERS.get(cfg.provider, {}).get("label", cfg.provider))}</b> · model '
+                    f'<code>{sanitize_html(cfg.model or "—")}</code> · endpoint <code>{sanitize_html(host)}</code><br/>'
+                    f'<small style="color:var(--muted)">Server credentials active. Frontend API modification is disabled.</small></div>',
+                    unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ No backend LLM key configured on the server. Set `AEGIS_API_KEY` in `.env` or deployment Secrets to enable AI advisory generation.")
             sig = f"{data_sig}|{cfg.provider}|{cfg.model}|{cfg.base_url}"
             if st.button("Generate advisory", type="primary", disabled=not cfg.is_ready()):
-                with st.spinner(f"Asking {PROVIDERS[cfg.provider]['label']}…"):
+                with st.spinner(f"Requesting advisory from {PROVIDERS.get(cfg.provider, {}).get('label', cfg.provider)}…"):
                     try:
                         text = generate_llm_summary(events, summary, patterns, cfg)
                         st.session_state.advisory = {"sig": sig, "text": text, "meta": cfg.public_dict(),

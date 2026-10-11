@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="Indicator scan radar">
+  <style>
+    .s{transform-origin:80px 80px;animation:r 4s linear infinite}
+    .b{fill:#fbbf24;transform-box:fill-box;transform-origin:center;animation:p 2.2s ease-in-out infinite}
+    .b2{animation-delay:.9s}
+    @keyframes r{to{transform:rotate(360deg)}}
+    @keyframes p{50%{opacity:.25}}
+    @media (prefers-reduced-motion:reduce){.s,.b{animation:none}}
+  </style>
+  <circle cx="80" cy="80" r="70" fill="#0d1822" stroke="#27465a"/><circle cx="80" cy="80" r="46" fill="none" stroke="#1f3646" stroke-dasharray="3 5"/>
+  <circle cx="80" cy="80" r="22" fill="none" stroke="#1f3646" stroke-dasharray="3 5"/>
+  <path d="M10 80H150M80 10V150" stroke="#1b2c3a"/>
+  <g class="s"><path d="M80 80 L80 10 A70 70 0 0 1 143 50 Z" fill="#fbbf24" fill-opacity=".22"/></g>
+  <circle class="b" cx="110" cy="52" r="4"/><circle class="b b2" cx="56" cy="104" r="4"/><circle cx="80" cy="80" r="3" fill="#2dd4bf"/>
+</svg>

