@@ -122,6 +122,12 @@ with st.sidebar:
     st.markdown('<div class="side-h">About</div>', unsafe_allow_html=True)
     st.caption("AegisTrace AI is a defensive triage tool. It never executes commands, blocks IPs, or "
                "touches endpoints. Every response action needs analyst approval.")
+    st.markdown('<div style="font-size:0.75rem;color:var(--muted);margin-top:.4rem;">'
+                'Created by <b><a href="https://rajaryan.neocities.org" target="_blank" '
+                'style="color:var(--teal);text-decoration:none;">RAJ ARYAN</a></b>'
+                '<br/><a href="https://rajaryan.neocities.org" target="_blank" '
+                'style="color:var(--sky);text-decoration:none;font-size:0.7rem;">rajaryan.neocities.org</a></div>',
+                unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
 # Data loading (cached)

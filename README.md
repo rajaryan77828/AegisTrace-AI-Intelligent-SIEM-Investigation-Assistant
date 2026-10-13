@@ -2,6 +2,7 @@
 
 <h1 align="center">AegisTrace AI</h1>
 <p align="center"><strong>SIEM investigation assistant</strong> — detect, correlate, investigate, defend.</p>
+<p align="center"><em>Created by <strong><a href="https://rajaryan.neocities.org">RAJ ARYAN</a></strong> · <a href="https://rajaryan.neocities.org">rajaryan.neocities.org</a></em></p>
 
 AegisTrace AI is a defensive SOC triage app built with Python and Streamlit. Load SIEM alerts (JSON or CSV) and it
 normalizes them, rebuilds the timeline, maps activity to MITRE ATT&CK, correlates patterns, extracts indicators, scores
@@ -139,4 +140,4 @@ epoch/numeric parsing, animated artwork, and an AI advisory tab.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — Copyright (c) 2026 **RAJ ARYAN** ([rajaryan.neocities.org](https://rajaryan.neocities.org)). See [LICENSE](LICENSE).

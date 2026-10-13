@@ -637,6 +637,7 @@ def analyze_events(raw_events: Any) -> dict:
 def build_report(result: dict) -> dict:
     return {
         "product": "AegisTrace AI", "version": VERSION, "report_type": "Defensive SIEM Triage Report",
+        "created_by": "RAJ ARYAN", "author_url": "https://rajaryan.neocities.org",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "risk_score": result["summary"]["risk_score"], "summary": result["summary"],
         "mitre_techniques": result["summary"].get("mitre_techniques", []),

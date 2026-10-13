@@ -356,6 +356,7 @@ def render_art_side(name: str, alt: str = "") -> str:
 
 def render_footer(version: str, generated: str) -> str:
     return (f'<div class="footer"><b>AegisTrace AI</b> — defensive SOC triage · v{esc(version)} · {esc(generated)}'
+            f'<br/>Created by <b><a href="https://rajaryan.neocities.org" target="_blank" style="color:var(--teal);text-decoration:none;">RAJ ARYAN</a></b>'
             '<small>All response actions require analyst review. This tool does not execute commands, '
             'access endpoints, or perform automated containment.</small></div>')
 
